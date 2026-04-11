@@ -93,6 +93,7 @@ def main():
     with multiprocessing.Manager() as manager:
         client_list = manager.list()
         sigterm_received = manager.Value("c_short", 0)
+        next_client_id = 0
         with multiprocessing.Pool(processes=os.process_cpu_count()) as processes_pool:
             processes_pool.apply_async(handle_client_response, (client_list,))
 
@@ -111,7 +112,9 @@ def main():
                         client_socket, _ = server_socket.accept()
 
                         logging.info("A new client has connected")
-                        message_handler_instance = message_handler.MessageHandler()
+                        client_id = next_client_id
+                        next_client_id += 1
+                        message_handler_instance = message_handler.MessageHandler(client_id)
                         client_list.append([message_handler_instance, client_socket])
                         processes_pool.apply_async(
                             handle_client_request,
