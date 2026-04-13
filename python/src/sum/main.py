@@ -24,18 +24,27 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
+        self.eof_input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
+        )
+        self.eof_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
+        )
         self.amount_by_fruit_by_client = {}
+        self.lock = threading.Lock()
 
     def _process_data(self, fruit, amount, client_id):
         logging.info(f"Process data")
-        client_fruits = self.amount_by_fruit_by_client.setdefault(client_id, {})
-        client_fruits[fruit] = client_fruits.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
+        with self.lock:
+            client_fruits = self.amount_by_fruit_by_client.setdefault(client_id, {})
+            client_fruits[fruit] = client_fruits.get(
+                fruit, fruit_item.FruitItem(fruit, 0)
+            ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _process_eof(self, client_id):
         logging.info(f"Broadcasting data messages for client {client_id}")
-        client_fruits = self.amount_by_fruit_by_client.pop(client_id, {})
+        with self.lock:
+            client_fruits = self.amount_by_fruit_by_client.pop(client_id, {})
         for final_fruit_item in client_fruits.values():
             for data_output_exchange in self.data_output_exchanges:
                 data_output_exchange.send(
@@ -48,16 +57,30 @@ class SumFilter:
         for data_output_exchange in self.data_output_exchanges:
             data_output_exchange.send(message_protocol.internal.serialize([client_id]))
 
-    def process_data_messsage(self, message, ack, nack):
+    def process_data_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
         else:
-            self._process_eof(*fields)
+            client_id = fields[0]
+            logging.info(f"Propagating EOF for client {client_id} to exchange")
+            self.eof_output_exchange.send(message_protocol.internal.serialize([client_id]))
+        ack()
+
+    def process_eof_message(self, message, ack, nack):
+        fields = message_protocol.internal.deserialize(message)
+        client_id = fields[0]
+        self._process_eof(client_id)
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_data_messsage)
+        eof_thread = threading.Thread(
+            target=self.eof_input_exchange.start_consuming,
+            args=(self.process_eof_message,),
+            daemon=True,
+        )
+        eof_thread.start()
+        self.input_queue.start_consuming(self.process_data_message)
 
 def main():
     logging.basicConfig(level=logging.INFO)
