@@ -77,12 +77,8 @@ class SumFilter:
         client_id = fields[0]
         sender_id = fields[1]
         if sender_id == ID:
-            logging.info(f"Sum {ID}: ignoring own EOF for client {client_id}")
             ack()
             return
-        logging.info(f"Sum {ID}: received EOF for client {client_id} from sum {sender_id}, data_idle={self.data_idle.is_set()}")
-        waited = self.data_idle.wait(timeout=3)
-        logging.info(f"Sum {ID}: data_idle wait returned {waited} for client {client_id}")
         self._process_eof(client_id)
         ack()
 
