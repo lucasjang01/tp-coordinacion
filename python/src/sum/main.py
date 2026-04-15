@@ -32,6 +32,8 @@ class SumFilter:
         )
         self.amount_by_fruit_by_client = {}
         self.lock = threading.Lock()
+        self.data_idle = threading.Event()
+        self.data_idle.set()
 
     def _process_data(self, fruit, amount, client_id):
         logging.info(f"Process data")
@@ -60,16 +62,27 @@ class SumFilter:
     def process_data_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
+            self.data_idle.clear()
             self._process_data(*fields)
+            self.data_idle.set()
         else:
             client_id = fields[0]
+            self._process_eof(client_id)
             logging.info(f"Propagating EOF for client {client_id} to exchange")
-            self.eof_output_exchange.send(message_protocol.internal.serialize([client_id]))
+            self.eof_output_exchange.send(message_protocol.internal.serialize([client_id, ID]))
         ack()
 
     def process_eof_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         client_id = fields[0]
+        sender_id = fields[1]
+        if sender_id == ID:
+            logging.info(f"Sum {ID}: ignoring own EOF for client {client_id}")
+            ack()
+            return
+        logging.info(f"Sum {ID}: received EOF for client {client_id} from sum {sender_id}, data_idle={self.data_idle.is_set()}")
+        waited = self.data_idle.wait(timeout=3)
+        logging.info(f"Sum {ID}: data_idle wait returned {waited} for client {client_id}")
         self._process_eof(client_id)
         ack()
 

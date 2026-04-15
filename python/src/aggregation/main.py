@@ -24,9 +24,10 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruit_top_by_client = {}
+        self.eof_count_by_client = {}
 
     def _process_data(self, fruit, amount, client_id):
-        logging.info("Processing data message")
+        logging.info(f"Aggregation: data for client {client_id}: {fruit} {amount}")
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
@@ -35,7 +36,13 @@ class AggregationFilter:
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
     def _process_eof(self, client_id):
-        logging.info(f"Received EOF for client {client_id}")
+        count = self.eof_count_by_client.get(client_id, 0) + 1
+        self.eof_count_by_client[client_id] = count
+        logging.info(f"Aggregation: EOF for client {client_id} ({count}/{SUM_AMOUNT})")
+        if count < SUM_AMOUNT:
+            return
+        del self.eof_count_by_client[client_id]
+        logging.info(f"Aggregation: calculating result for client {client_id}")
         fruit_top = self.fruit_top_by_client.pop(client_id, [])
         fruit_chunk = list(fruit_top[-TOP_SIZE:])
         fruit_chunk.reverse()
