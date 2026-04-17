@@ -1,6 +1,7 @@
 import os
 import logging
 import bisect
+import threading
 
 from common import middleware, message_protocol, fruit_item
 
@@ -12,22 +13,31 @@ SUM_PREFIX = os.environ["SUM_PREFIX"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
+AGGREGATION_CONTROL_EXCHANGE = "AGGREGATION_CONTROL_EXCHANGE"
 
 
 class AggregationFilter:
 
     def __init__(self):
-        self.input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
+        self.data_input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, f"{AGGREGATION_PREFIX}_queue"
+        )
+        self.eof_input_control = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, AGGREGATION_CONTROL_EXCHANGE, [AGGREGATION_CONTROL_EXCHANGE]
+        )
+        self.eof_output_control = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, AGGREGATION_CONTROL_EXCHANGE, [AGGREGATION_CONTROL_EXCHANGE]
         )
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruit_top_by_client = {}
         self.eof_count_by_client = {}
+        self.lock = threading.Lock()
+        self.data_idle = threading.Event()
+        self.data_idle.set()
 
     def _process_data(self, fruit, amount, client_id):
-        logging.info(f"Aggregation: data for client {client_id}: {fruit} {amount}")
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
@@ -39,33 +49,49 @@ class AggregationFilter:
     def _process_eof(self, client_id):
         count = self.eof_count_by_client.get(client_id, 0) + 1
         self.eof_count_by_client[client_id] = count
-        logging.info(f"Aggregation: EOF for client {client_id} ({count}/{SUM_AMOUNT})")
         if count < SUM_AMOUNT:
             return
         del self.eof_count_by_client[client_id]
-        logging.info(f"Aggregation: calculating result for client {client_id}")
         fruit_top = self.fruit_top_by_client.pop(client_id, [])
-        fruit_chunk = list(fruit_top[-TOP_SIZE:])
-        fruit_chunk.reverse()
-        result = list(
-            map(
-                lambda fi: (fi.fruit, fi.amount),
-                fruit_chunk,
-            )
-        )
+        result = [(fi.fruit, fi.amount) for fi in reversed(fruit_top)]
         self.output_queue.send(message_protocol.internal.serialize([result, client_id]))
 
-    def process_messsage(self, message, ack, nack):
-        logging.info("Process message")
+    def process_data_message(self, message, ack, nack):
+        self.data_idle.clear()
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
-            self._process_data(*fields)
+            with self.lock:
+                self._process_data(*fields)
         else:
-            self._process_eof(*fields)
+            client_id = fields[0]
+            with self.lock:
+                self._process_eof(client_id)
+            self.eof_output_control.send(
+                message_protocol.internal.serialize([client_id, ID])
+            )
+        ack()
+        self.data_idle.set()
+
+    def process_eof_message(self, message, ack, nack):
+        fields = message_protocol.internal.deserialize(message)
+        client_id = fields[0]
+        sender_id = fields[1]
+        if sender_id == ID:
+            ack()
+            return
+        self.data_idle.wait()
+        with self.lock:
+            self._process_eof(client_id)
         ack()
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        eof_thread = threading.Thread(
+            target=self.eof_input_control.start_consuming,
+            args=(self.process_eof_message,),
+            daemon=True,
+        )
+        eof_thread.start()
+        self.data_input_queue.start_consuming(self.process_data_message)
 
 
 def main():

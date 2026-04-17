@@ -18,12 +18,9 @@ class SumFilter:
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
-        self.data_output_exchanges = []
-        for i in range(AGGREGATION_AMOUNT):
-            data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
-            )
-            self.data_output_exchanges.append(data_output_exchange)
+        self.data_output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, f"{AGGREGATION_PREFIX}_queue"
+        )
         self.eof_input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
         )
@@ -36,7 +33,6 @@ class SumFilter:
         self.data_idle.set()
 
     def _process_data(self, fruit, amount, client_id):
-        logging.info(f"Process data")
         with self.lock:
             client_fruits = self.amount_by_fruit_by_client.setdefault(client_id, {})
             client_fruits[fruit] = client_fruits.get(
@@ -44,20 +40,17 @@ class SumFilter:
             ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _process_eof(self, client_id):
-        logging.info(f"Broadcasting data messages for client {client_id}")
         with self.lock:
             client_fruits = self.amount_by_fruit_by_client.pop(client_id, {})
         for final_fruit_item in client_fruits.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [final_fruit_item.fruit, final_fruit_item.amount, client_id]
-                    )
+            self.data_output_queue.send(
+                message_protocol.internal.serialize(
+                    [final_fruit_item.fruit, final_fruit_item.amount, client_id]
                 )
-
-        logging.info(f"Broadcasting EOF message for client {client_id}")
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
+            )
+        self.data_output_queue.send(
+            message_protocol.internal.serialize([client_id])
+        )
 
     def process_data_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
@@ -68,7 +61,6 @@ class SumFilter:
         else:
             client_id = fields[0]
             self._process_eof(client_id)
-            logging.info(f"Propagating EOF for client {client_id} to exchange")
             self.eof_output_exchange.send(message_protocol.internal.serialize([client_id, ID]))
         ack()
 
