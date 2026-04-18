@@ -13,7 +13,7 @@ SUM_PREFIX = os.environ["SUM_PREFIX"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
-AGGREGATION_CONTROL_EXCHANGE = "AGGREGATION_CONTROL_EXCHANGE"
+AGGREGATION_CONTROL_EXCHANGE = f"{AGGREGATION_PREFIX}_control"
 
 
 class AggregationFilter:
@@ -31,6 +31,9 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.eof_thread_output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, OUTPUT_QUEUE
+        )
         self.fruit_top_by_client = {}
         self.eof_count_by_client = {}
         self.lock = threading.Lock()
@@ -46,7 +49,7 @@ class AggregationFilter:
                 return
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
-    def _process_eof(self, client_id):
+    def _process_eof(self, client_id, output_queue):
         count = self.eof_count_by_client.get(client_id, 0) + 1
         self.eof_count_by_client[client_id] = count
         if count < SUM_AMOUNT:
@@ -54,7 +57,7 @@ class AggregationFilter:
         del self.eof_count_by_client[client_id]
         fruit_top = self.fruit_top_by_client.pop(client_id, [])
         result = [(fi.fruit, fi.amount) for fi in reversed(fruit_top)]
-        self.output_queue.send(message_protocol.internal.serialize([result, client_id]))
+        output_queue.send(message_protocol.internal.serialize([result, client_id]))
 
     def process_data_message(self, message, ack, nack):
         self.data_idle.clear()
@@ -65,7 +68,7 @@ class AggregationFilter:
         else:
             client_id = fields[0]
             with self.lock:
-                self._process_eof(client_id)
+                self._process_eof(client_id, self.output_queue)
             self.eof_output_control.send(
                 message_protocol.internal.serialize([client_id, ID])
             )
@@ -81,7 +84,7 @@ class AggregationFilter:
             return
         self.data_idle.wait()
         with self.lock:
-            self._process_eof(client_id)
+            self._process_eof(client_id, self.eof_thread_output_queue)
         ack()
 
     def start(self):

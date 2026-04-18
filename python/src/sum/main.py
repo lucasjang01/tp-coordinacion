@@ -9,7 +9,7 @@ MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
 SUM_PREFIX = os.environ["SUM_PREFIX"]
-SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
+SUM_CONTROL_EXCHANGE = f"{SUM_PREFIX}_control"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
@@ -27,6 +27,9 @@ class SumFilter:
         self.eof_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
         )
+        self.eof_thread_output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, f"{AGGREGATION_PREFIX}_queue"
+        )
         self.amount_by_fruit_by_client = {}
         self.lock = threading.Lock()
         self.data_idle = threading.Event()
@@ -39,16 +42,16 @@ class SumFilter:
                 fruit, fruit_item.FruitItem(fruit, 0)
             ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self, client_id):
+    def _process_eof(self, client_id, output_queue):
         with self.lock:
             client_fruits = self.amount_by_fruit_by_client.pop(client_id, {})
         for final_fruit_item in client_fruits.values():
-            self.data_output_queue.send(
+            output_queue.send(
                 message_protocol.internal.serialize(
                     [final_fruit_item.fruit, final_fruit_item.amount, client_id]
                 )
             )
-        self.data_output_queue.send(
+        output_queue.send(
             message_protocol.internal.serialize([client_id])
         )
 
@@ -60,7 +63,7 @@ class SumFilter:
             self.data_idle.set()
         else:
             client_id = fields[0]
-            self._process_eof(client_id)
+            self._process_eof(client_id, self.data_output_queue)
             self.eof_output_exchange.send(message_protocol.internal.serialize([client_id, ID]))
         ack()
 
@@ -71,7 +74,7 @@ class SumFilter:
         if sender_id == ID:
             ack()
             return
-        self._process_eof(client_id)
+        self._process_eof(client_id, self.eof_thread_output_queue)
         ack()
 
     def start(self):
