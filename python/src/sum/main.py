@@ -75,6 +75,7 @@ class SumFilter:
         if sender_id == ID:
             ack()
             return
+        self.data_idle.wait()
         self._process_eof(client_id, self.eof_thread_output_queue)
         ack()
 
