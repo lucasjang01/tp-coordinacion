@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import threading
 
 from common import middleware, message_protocol, fruit_item
@@ -77,14 +78,26 @@ class SumFilter:
         self._process_eof(client_id, self.eof_thread_output_queue)
         ack()
 
+    def handle_sigterm(self, _signum, _frame):
+        self.input_queue.stop_consuming()
+        self.eof_input_exchange.stop_consuming()
+
     def start(self):
+        signal.signal(signal.SIGTERM, self.handle_sigterm)
         eof_thread = threading.Thread(
             target=self.eof_input_exchange.start_consuming,
             args=(self.process_eof_message,),
             daemon=True,
         )
         eof_thread.start()
-        self.input_queue.start_consuming(self.process_data_message)
+        try:
+            self.input_queue.start_consuming(self.process_data_message)
+        finally:
+            self.input_queue.close()
+            self.data_output_queue.close()
+            self.eof_input_exchange.close()
+            self.eof_output_exchange.close()
+            self.eof_thread_output_queue.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)

@@ -1,6 +1,7 @@
 import os
 import logging
 import bisect
+import signal
 import threading
 
 from common import middleware, message_protocol, fruit_item
@@ -87,14 +88,26 @@ class AggregationFilter:
             self._process_eof(client_id, self.eof_thread_output_queue)
         ack()
 
+    def handle_sigterm(self, _signum, _frame):
+        self.data_input_queue.stop_consuming()
+        self.eof_input_control.stop_consuming()
+
     def start(self):
+        signal.signal(signal.SIGTERM, self.handle_sigterm)
         eof_thread = threading.Thread(
             target=self.eof_input_control.start_consuming,
             args=(self.process_eof_message,),
             daemon=True,
         )
         eof_thread.start()
-        self.data_input_queue.start_consuming(self.process_data_message)
+        try:
+            self.data_input_queue.start_consuming(self.process_data_message)
+        finally:
+            self.data_input_queue.close()
+            self.eof_input_control.close()
+            self.eof_output_control.close()
+            self.output_queue.close()
+            self.eof_thread_output_queue.close()
 
 
 def main():

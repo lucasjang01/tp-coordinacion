@@ -46,6 +46,11 @@ def handle_client_request(client_socket, message_handler):
 def handle_client_response(client_list):
     input_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
 
+    def _handle_sigterm(_signum, _frame):
+        input_queue.stop_consuming()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     def _consume_result(message, ack, nack):
         client_index = 0
         try:
@@ -76,15 +81,18 @@ def handle_client_response(client_list):
             nack()
             input_queue.stop_consuming()
 
-    input_queue.start_consuming(_consume_result)
-    input_queue.close()
+    try:
+        input_queue.start_consuming(_consume_result)
+    finally:
+        input_queue.close()
 
 
 def handle_sigterm(server_socket, client_list, sigterm_received):
-    server_socket.shutdown(socket.SHUT_RDWR)
+    sigterm_received.value = 1
     for [_, client_socket] in client_list:
         client_socket.shutdown(socket.SHUT_RDWR)
-    sigterm_received.value = 1
+        client_socket.close()
+    server_socket.shutdown(socket.SHUT_RDWR)
 
 
 def main():
