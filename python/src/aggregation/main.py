@@ -40,6 +40,7 @@ class AggregationFilter:
         self.lock = threading.Lock()
         self.data_idle = threading.Event()
         self.data_idle.set()
+        self.data_arrived = threading.Event()
 
     def _process_data(self, fruit, amount, client_id):
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
@@ -62,6 +63,7 @@ class AggregationFilter:
 
     def process_data_message(self, message, ack, nack):
         self.data_idle.clear()
+        self.data_arrived.set()
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             with self.lock:
@@ -73,6 +75,7 @@ class AggregationFilter:
             self.eof_output_control.send(
                 message_protocol.internal.serialize([client_id, ID])
             )
+        self.data_arrived.clear()
         ack()
         self.data_idle.set()
 
@@ -83,7 +86,8 @@ class AggregationFilter:
         if sender_id == ID:
             ack()
             return
-        self.data_idle.wait()
+        if self.data_arrived.wait(timeout=1):
+            self.data_idle.wait()
         with self.lock:
             self._process_eof(client_id, self.eof_thread_output_queue)
         ack()

@@ -35,6 +35,7 @@ class SumFilter:
         self.lock = threading.Lock()
         self.data_idle = threading.Event()
         self.data_idle.set()
+        self.data_arrived = threading.Event()
 
     def _process_data(self, fruit, amount, client_id):
         with self.lock:
@@ -60,7 +61,9 @@ class SumFilter:
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self.data_idle.clear()
+            self.data_arrived.set()
             self._process_data(*fields)
+            self.data_arrived.clear()
             self.data_idle.set()
         else:
             client_id = fields[0]
@@ -75,7 +78,8 @@ class SumFilter:
         if sender_id == ID:
             ack()
             return
-        self.data_idle.wait()
+        if self.data_arrived.wait(timeout=1):
+            self.data_idle.wait()
         self._process_eof(client_id, self.eof_thread_output_queue)
         ack()
 
